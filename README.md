@@ -1,7 +1,9 @@
 > [!WARNING]
 > **这是 TouchFish v4 版本，自 v4 开始不再向前兼容 v1 - v3。**
 >
-> **根据规划，此版本（v4.12.0）是 TouchFish v4 的最后一个子版本。TouchFish v5 正在施工，[链接](https://github.com/wwyfqwq/TFV5_server)。下一版本预计将进入 v5。**
+> **根据规划，v4.7.0 是 TouchFish v4 的最后一个常规子版本，其后的更新为安全更新。**
+>
+> **安全更新结束后将进入下一版本（不是 v5，v5 在 [这里](https://github.com/wwyfqwq/TouchFishServer)）。**
 
 > [!IMPORTANT]
 > **重要通知：贡献者须知**
@@ -44,9 +46,9 @@
 > 
 > 不建议下载预编译的二进制文件，建议通过源代码部署：
 > 
-> `wget https://github.com/wwyfqwq/TouchFishV4/releases/download/v4.12.0/LTS.py && python3 LTS.py`
+> `wget https://github.com/wwyfqwq/TouchFishV4/releases/download/v4.12.1/LTS.py && python3 LTS.py`
 > 
-> （也可以通过 @ILoveScratch2 提供的镜像站，但是截至 2026/7/13 只更新到了 v4.7.0 版本：
+> （也可以通过 @ILoveScratch2 提供的镜像站，但是截至 2026/11/20 只更新到了 v4.7.0 版本：
 >
 > `wget https://mirror.ilovescratch.us.ci/api/net/183301217/LTS.py && python3 LTS.py`）
 

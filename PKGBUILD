@@ -1,12 +1,12 @@
 # Maintainer: TouchFish Community <johnchiao@outlook.com>
 pkgname=touchfish
-pkgver=4.12.0
+pkgver=4.12.1
 pkgrel=1
 pkgdesc="FOSS multi-distribution LAN chatting tool"
 arch=('any')
 url="https://github.com/touchfish-devs/TouchFish-AUR"
 license=('MIT')
-depends=('python')                 # 仅需 Python 标准库，无第三方依赖
+depends=('python') # 仅需 Python 标准库，无第三方依赖
 makedepends=()
 optdepends=()
 source=("$pkgname-$pkgver.tar.gz::https://github.com/touchfish-devs/TouchFish-AUR/archive/refs/tags/v$pkgver.tar.gz")

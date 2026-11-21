@@ -361,7 +361,7 @@ import threading
 import time
 
 # 程序版本
-VERSION = "v4.12.0"
+VERSION = "v4.12.1"
 
 # 用于客户端解析协议 1.2
 RESULTS = \
@@ -376,15 +376,19 @@ RESULTS = \
 """
 灰色 (black):
 - 输入模式中的所有输入输出文本（除了 help 指令的输出）
-- 消息头中用户名前的 @ 符号，行末的 : 符号，-> 连接符，以及时间
+- 消息头中用户名前的 @ 符号，行末的 : 符号，以及时间
 红色 (red):
+- [加入提示]，[公告]，[广播]，[文件] 标签的颜色
 - 加入提示，公告，广播文本的颜色
 - 消息头中自己的用户名
 - 启动阶段的失败提示
 绿色 (green):
+- [私聊] 标签的颜色
+- 私聊消息的消息头中中发送方和接收方之间的 -> 连接符
 - 其他用户发送的私聊消息的颜色
 - 启动阶段的成功提示
 蓝色 (blue):
+- [发给您的]，[您发送的] 标签的颜色
 - 用户发送的文本颜色
 - help 指令显示的帮助消息中的第三段和第六段
 白色 (white):
@@ -795,10 +799,6 @@ online_count = 1
 latest_date = "1949-10-01"
 buffer = ""
 bell_countdown = 0
-if platform.system() == "Windows":
-	shortcut = "C"
-else:
-	shortcut = "D"
 exit_flag = False
 log_queue = queue.Queue()
 receive_queue = queue.Queue()
@@ -814,6 +814,10 @@ print_queue = queue.Queue()
 
 
 
+
+#
+def nothing(text):
+	pass
 
 # 响铃
 def ring():
@@ -840,6 +844,18 @@ def enter():
 		message = message[:-1]
 	return message
 
+# 要求用户确认操作
+def confirm():
+	try:
+		if not input("\033[0m\033[1;30m确定要继续吗？[y/N] ") in ["y", "Y"]:
+			print("\033[8;30m", end="", flush=True)
+			return False
+	except BaseException:
+		print("\n\033[8;30m", end="", flush=True)
+		return False
+	print("\033[8;30m", end="", flush=True)
+	return True
+
 # 利用 ANSI 转义序列给文本染色，
 # 其中 \033[8;30m 用于输出模式下隐藏输入的文本；
 # color_code 传入 None 时不额外染色（下同）
@@ -863,20 +879,14 @@ def prints(text, color_code=None):
 	else:
 		print_queue.put(dye(text, color_code))
 
-# 不受 blocked 变量控制的强制文本输出：
-# 只用于 dashboard 指令、flood 指令（部分）
-# 和 help 指令输出信息
+# 不受 blocked 变量控制的强制文本输出
 def printf(text, color_code=None):
 	print(dye(text, color_code))
 
-# 用于第三部分的指令函数输出提示信息，
-# 根据传入的 verbose 变量决定是否输出指令执行结果提示：
-# 用户执行指令时 verbose 变量为 True，输出相应提示信息；
-# 随后请求会发给服务端，服务端调用同样的函数进行二次检查，
-# 此时 verbose 变量为 False，因此服务端不会看到奇怪的提示信息
-def printc(verbose, text):
-	if verbose:
-		print(dye(text, "black"))
+# 不受 blocked 变量控制的强制文本输出：
+# 其实是 printf 的子集，但固定颜色为黑色
+def printc(text):
+	print(dye(text, "black"))
 
 # 解析用户名
 def parse_username(arg, expected_status):
@@ -956,6 +966,63 @@ def formatize_config(key, value):
 		value.sort()
 	return value
 
+# 检查服务端配置项
+def check_config(tmp_config, diff_key=None, diff_value=None):
+	for item, type in CONFIG_TYPE_CHECK_TABLE.items():
+		first, second = item.split(".")
+		tmp_object = tmp_config[first][second]
+		if item == diff_key:
+			tmp_object = eval(diff_value)
+		if not eval("isinstance(tmp_object, {})".format(type)):
+			return "输入数据的类型与参数不匹配。"
+		if type == "int" and tmp_object < 1:
+			return "输入的数值必须是正整数。"
+		if item == "message.max_length" and tmp_object > 16384:
+			return "允许的消息长度不得大于 16384。"
+		if item == "file.max_size" and tmp_object > 1073741824:
+			return "允许的文件大小不得大于 1073741824。"
+		if type == "list":
+			for element in tmp_object:
+				if not isinstance(element, str):
+					return "列表中的元素必须是 str（字符串）类型。"
+			if len(tmp_object) != len(set(tmp_object)):
+				return "列表中不能出现重复元素。"
+		if item == "ban.words":
+			for element in tmp_object:
+				if "\n" in element or "\r" in element or not element:
+					return "屏蔽词列表中不能出现空串和换行符。"
+		if item == "ban.ip":
+			for element in tmp_object:
+				if not check_ip(element):
+					return "IP 黑名单中的元素 {} 不是有效的点分十进制格式 IPv4 地址。".format(element)
+		if item == "general.server_ip" and not check_ip(tmp_object):
+			return "输入的服务端地址不是有效的点分十进制格式 IPv4 地址。"
+		if item == "general.server_port" and tmp_object > 65535:
+			return "端口号应为不大于 65535 的正整数。"
+		if item == "general.server_username" and not tmp_object:
+			return "服务端管理员的用户名不应为空。"
+		if item == "general.max_connections" and tmp_object > 128:
+			return "最大在线连接数应为不大于 128 的正整数。"
+	if diff_key == "gate.enter_hint":
+		gate_enter_hint = eval(diff_value)
+	else:
+		gate_enter_hint = tmp_config["gate"]["enter_hint"]
+	if diff_key == "message.max_length":
+		message_max_length = eval(diff_value)
+	else:
+		message_max_length = tmp_config["message"]["max_length"]
+	if diff_key == "ban.words":
+		ban_words = eval(diff_value)
+	else:
+		ban_words = tmp_config["ban"]["words"]
+	if len(gate_enter_hint) > message_max_length:
+		return "输入的进入提示太长，超出了参数 message.max_length 设定的限制。"
+	for word in ban_words:
+		if word in gate_enter_hint:
+			return "输入的进入提示包含屏蔽词：" + word
+	return None # 配置没有问题
+
+
 # 返回一个 "xxxx-xx-xx xx:xx:xx.xxxxxx" 格式的字符串
 # 表示当前时区的当前时间；下面的 announce 和 print_message 函数
 # 对其切片 [11:19]，可以得到其中的 "xx:xx:xx"；类似地，
@@ -972,8 +1039,11 @@ def announce(uid):
 			first_line += dye("--- ({} 23:59:59) ---\n\n".format(latest_date), "yellow")
 		latest_date = time_str()[0:10]
 		first_line += dye("--- ({} 00:00:00) ---\n".format(latest_date), "yellow")
-	first_line += dye("[" + time_str()[11:19] + "] ", "black")
-	first_line += dye("@", "black")
+	first_line += dye("[" + time_str()[11:19] + "]", "black")
+	if uid == my_uid:
+		first_line += dye(" [您发送的]", "blue")
+	first_line += dye(" [公告]", "red")
+	first_line += dye(" @", "black")
 	if uid == my_uid:
 		first_line += dye(users[uid]["username"], "red")
 	else:
@@ -1004,6 +1074,7 @@ def print_message(message):
 	except KeyError:
 		pass
 	if message["to"] == -2:
+		first_line += dye(" [广播]", "red")
 		# 增加 bell_countdown 的值以请求
 		# thread_output 完成额外的 4 次响铃，
 		# 由于 thread_output 先将 bell_countdown
@@ -1014,15 +1085,15 @@ def print_message(message):
 		bell_countdown += 75
 	if message["to"] >= 0:
 		first_line += dye(" [私聊]", "green")
-	first_line += " "
-	first_line += dye("@", "black")
+	first_line += dye(" @", "black")
 	if message["from"] == my_uid:
 		first_line += dye(users[message["from"]]["username"], "red")
 	else:
 		first_line += dye(users[message["from"]]["username"], "yellow")
 	# 对于私聊消息，上面的代码输出发送方，下面的代码输出接收方
 	if message["to"] >= 0:
-		first_line += dye(" -> @", "black")
+		first_line += dye(" -> ", "green")
+		first_line += dye("@", "black")
 		if message["to"] == my_uid:
 			first_line += dye(users[message["to"]]["username"], "red")
 		else:
@@ -1221,7 +1292,12 @@ by          请求发送者的 UID：固定传入 receive_queue
 # 参数中只有一个 arg (缺省为 None，函数中不会调用)，
 # 用于在第四部分的 thread_input 线程中统一调用接口
 
-def do_doorman(arg, verbose=True, by=-1):
+# 根据传入的 verbose 变量决定是否输出指令执行结果提示：
+# 用户执行指令时 verbose 变量为 printc，输出相应提示信息；
+# 随后请求会发给服务端，服务端调用同样的函数进行二次检查，
+# 此时 verbose 变量为 nothing，因此服务端不会看到奇怪的提示信息
+
+def do_doorman(arg, verbose=printc, by=-1):
 	global log_queue
 	global send_queue
 	global online_count
@@ -1229,20 +1305,20 @@ def do_doorman(arg, verbose=True, by=-1):
 	if by == -1:
 		by = my_uid
 	if not users[by]["status"] in ["Admin", "Root"]:
-		printc(verbose, "只有处于 Admin 或 Root 状态的用户有权执行该操作。")
+		verbose("只有处于 Admin 或 Root 状态的用户有权执行该操作。")
 		return
 	arg = arg.split(" ", 1)
 	if len(arg) != 2:
-		printc(verbose, "参数错误：应当给出恰好 2 个参数。")
+		verbose("参数错误：应当给出恰好 2 个参数。")
 		return
 	arg[1] = parse_username(arg[1], ["Pending"])
 	try:
 		arg[1] = int(arg[1])
 	except:
-		printc(verbose, "参数错误：用户解析失败，只能对状态为 Pending 的用户操作。")
+		verbose("参数错误：用户解析失败，只能对状态为 Pending 的用户操作。")
 		return
 	if not arg[0] in ["accept", "reject"]:
-		printc(verbose, "参数错误：第一个参数必须是 accept 和 reject 中的某一项。")
+		verbose("参数错误：第一个参数必须是 accept 和 reject 中的某一项。")
 		return
 
 	if side == "Server":
@@ -1258,7 +1334,7 @@ def do_doorman(arg, verbose=True, by=-1):
 			for i in range(len(users)):
 				if users[i]["status"] in ["Online", "Admin", "Root"]:
 						send_queue.put(json.dumps({"to": i, "content": {"type": "GATE.STATUS_CHANGE.ANNOUNCE", "status": "Offline", "uid": arg[1], "operator": 0}})) # 协议 1.6.2
-			printc(verbose, "操作失败：该用户在操作前已经下线。")
+			verbose("操作失败：该用户在操作前已经下线。")
 			return
 	
 	if arg[0] == "accept":
@@ -1290,9 +1366,9 @@ def do_doorman(arg, verbose=True, by=-1):
 		if side == "Client":
 			upload({"type": "GATE.STATUS_CHANGE.REQUEST", "status": "Rejected", "uid": arg[1]}) # 协议 1.6.1
 	
-	printc(verbose, "操作成功。")
+	verbose("操作成功。")
 
-def do_kick(arg, verbose=True, by=-1):
+def do_kick(arg, verbose=printc, by=-1):
 	global log_queue
 	global send_queue
 	global online_count
@@ -1300,19 +1376,19 @@ def do_kick(arg, verbose=True, by=-1):
 	if by == -1:
 		by = my_uid
 	if not users[by]["status"] in ["Admin", "Root"]:
-		printc(verbose, "只有处于 Admin 或 Root 状态的用户有权执行该操作。")
+		verbose("只有处于 Admin 或 Root 状态的用户有权执行该操作。")
 		return
 	if not arg:
-		printc(verbose, "参数错误：应当给出恰好 1 个参数。")
+		verbose("参数错误：应当给出恰好 1 个参数。")
 		return
 	arg = parse_username(arg, ["Online", "Admin"])
 	try:
 		arg = int(arg)
 	except:
-		printc(verbose, "参数错误：用户解析失败，只能对状态为 Online 或 Admin 的用户操作。")
+		verbose("参数错误：用户解析失败，只能对状态为 Online 或 Admin 的用户操作。")
 		return
 	if users[by]["status"] == "Admin" and users[arg]["status"] == "Admin":
-		printc(verbose, "参数错误：用户解析失败，状态为 Admin 的用户只能对状态为 Online 的用户操作。")
+		verbose("参数错误：用户解析失败，状态为 Admin 的用户只能对状态为 Online 的用户操作。")
 		return
 	
 	if side == "Server":
@@ -1332,36 +1408,36 @@ def do_kick(arg, verbose=True, by=-1):
 	if side == "Client":
 		upload({"type": "GATE.STATUS_CHANGE.REQUEST", "status": "Kicked", "uid": arg}) # 协议 1.6.1
 	
-	printc(verbose, "操作成功。")
+	verbose("操作成功。")
 
-def do_admin(arg, verbose=True, by=-1):
+def do_admin(arg, verbose=printc, by=-1):
 	global log_queue
 	global send_queue
 	if by == -1:
 		by = my_uid
 	if users[by]["status"] != "Root":
-		printc(verbose, "只有处于 Root 状态的用户有权执行该操作。")
+		verbose("只有处于 Root 状态的用户有权执行该操作。")
 		return
 	arg = arg.split(" ", 1)
 	if len(arg) != 2:
-		printc(verbose, "参数错误：应当给出恰好 2 个参数。")
+		verbose("参数错误：应当给出恰好 2 个参数。")
 		return
 	if not arg[0] in ["add", "remove"]:
-		printc(verbose, "参数错误：第一个参数必须是 add 和 remove 中的某一项。")
+		verbose("参数错误：第一个参数必须是 add 和 remove 中的某一项。")
 		return
 	arg[1] = parse_username(arg[1], ["Online", "Admin"])
 	try:
 		arg[1] = int(arg[1])
 	except:
 		if arg[0] == "add":
-			printc(verbose, "参数错误：用户解析失败，只能对状态为 Online 的用户操作。")
+			verbose("参数错误：用户解析失败，只能对状态为 Online 的用户操作。")
 		if arg[0] == "remove":
-			printc(verbose, "参数错误：用户解析失败，只能对状态为 Admin 的用户操作。")
+			verbose("参数错误：用户解析失败，只能对状态为 Admin 的用户操作。")
 		return
 	
 	if arg[0] == "add":
 		if users[arg[1]]["status"] != "Online":
-			printc(verbose, "参数错误：用户解析失败，只能对状态为 Online 的用户操作。")
+			verbose("参数错误：用户解析失败，只能对状态为 Online 的用户操作。")
 			return
 		users[arg[1]]["status"] = "Admin"
 		log_queue.put(json.dumps({"type": "GATE.STATUS_CHANGE.LOG", "time": time_str(), "status": "Admin", "uid": arg[1], "operator": by})) # 协议 1.6.3
@@ -1371,7 +1447,7 @@ def do_admin(arg, verbose=True, by=-1):
 	
 	if arg[0] == "remove":
 		if users[arg[1]]["status"] != "Admin":
-			printc(verbose, "参数错误：用户解析失败，只能对状态为 Admin 的用户操作。")
+			verbose("参数错误：用户解析失败，只能对状态为 Admin 的用户操作。")
 			return
 		users[arg[1]]["status"] = "Online"
 		log_queue.put(json.dumps({"type": "GATE.STATUS_CHANGE.LOG", "time": time_str(), "status": "Online", "uid": arg[1], "operator": by})) # 协议 1.6.3
@@ -1379,9 +1455,9 @@ def do_admin(arg, verbose=True, by=-1):
 			if users[i]["status"] in ["Online", "Admin", "Root"]:
 				send_queue.put(json.dumps({"to": i, "content": {"type": "GATE.STATUS_CHANGE.ANNOUNCE", "status": "Online", "uid": arg[1], "operator": by}})) # 协议 1.6.2
 	
-	printc(verbose, "操作成功。")
+	verbose("操作成功。")
 
-def do_config(arg, verbose=True, by=-1):
+def do_config(arg, verbose=printc, by=-1):
 	global log_queue
 	global send_queue
 	global config
@@ -1390,55 +1466,43 @@ def do_config(arg, verbose=True, by=-1):
 	if by == -1:
 		by = my_uid
 	if not users[by]["status"] in ["Admin", "Root"]:
-		printc(verbose, "只有处于 Admin 或 Root 状态的用户有权执行该操作。")
+		verbose("只有处于 Admin 或 Root 状态的用户有权执行该操作。")
 		return
 	if not arg:
-		printc(verbose, "参数错误：应当给出至少 1 个参数。")
+		verbose("参数错误：应当给出至少 1 个参数。")
 		return
 	arg = arg.split(" ", 1)
 	if not arg[0] in CONFIG_TYPE_CHECK_TABLE:
-		printc(verbose, "该参数不存在。")
+		verbose("该参数不存在。")
 		return
 	if arg[0].split(".")[0] == "general":
-		printc(verbose, "不允许在指令行内修改该参数，请退出聊天室后重新打开以修改。")
+		verbose("不允许在指令行内修改该参数，请退出聊天室后重新打开以修改。")
 		return
-	if verbose and len(arg) == 2:
+	if verbose == printc and len(arg) == 2:
 		if arg[0] == "gate.enter_hint":
-			printc(verbose, "请注意，本参数修改时 <value> 需要带引号并转义。")
-			printc(verbose, "例如，将进入提示设为英文 Hi there! 并且末尾换行：")
-			printc(verbose, r"  config gate.enter_hint 'Hi there!\n'")
-			printc(verbose, "为了降低误操作的可能性，建议删除后一个参数，进行交互修改。")
-			printc(verbose, "该参数被修改后将对【所有用户】重新发送【广播】，请谨慎操作！")
-			try:
-				if not input("\033[0m\033[1;30m确定要继续吗？[y/N] ") in ["y", "Y"]:
-					return
-			except BaseException:
+			verbose("请注意，本参数修改时 <value> 需要带引号并转义。")
+			verbose("例如，将进入提示设为英文 Hi there! 并且末尾换行：")
+			verbose(r"  config gate.enter_hint 'Hi there!\n'")
+			verbose("为了降低误操作的可能性，建议删除后一个参数，进行交互修改。")
+			verbose("该参数被修改后将对【所有用户】重新发送【广播】，请谨慎操作！")
+			if not confirm():
 				return
-			print("\033[8;30m", end="", flush=True)
 		if arg[0] == "ban.ip":
-			printc(verbose, "请注意，本参数修改时 <value> 需要带引号并转义。")
-			printc(verbose, "例如，设置禁止访问的 IP 为 127.0.0.1 和 192.168.1.1：")
-			printc(verbose, r"  config ban.ip ['127.0.0.1', '192.168.1.1']")
-			printc(verbose, "为了降低误操作的可能性，建议删除后一个参数，进行交互修改。")
-			printc(verbose, "该操作将【清空】原有的 IP 黑名单，请谨慎操作！")
-			try:
-				if not input("\033[0m\033[1;30m确定要继续吗？[y/N] ") in ["y", "Y"]:
-					return
-			except BaseException:
+			verbose("请注意，本参数修改时 <value> 需要带引号并转义。")
+			verbose("例如，设置禁止访问的 IP 为 127.0.0.1 和 192.168.1.1：")
+			verbose(r"  config ban.ip ['127.0.0.1', '192.168.1.1']")
+			verbose("为了降低误操作的可能性，建议删除后一个参数，进行交互修改。")
+			verbose("该操作将【清空】原有的 IP 黑名单，请谨慎操作！")
+			if not confirm():
 				return
-			print("\033[8;30m", end="", flush=True)
 		if arg[0] == "ban.words":
-			printc(verbose, "请注意，本参数修改时 <value> 需要带引号并转义。")
-			printc(verbose, "例如，设置屏蔽词为 fuck 和 shit：")
-			printc(verbose, r"  config ban.words ['fuck', 'shit']")
-			printc(verbose, "为了降低误操作的可能性，建议删除后一个参数，进行交互修改。")
-			printc(verbose, "该操作将【清空】原有的屏蔽词列表，请谨慎操作！")
-			try:
-				if not input("\033[0m\033[1;30m确定要继续吗？[y/N] ") in ["y", "Y"]:
-					return
-			except BaseException:
+			verbose("请注意，本参数修改时 <value> 需要带引号并转义。")
+			verbose("例如，设置屏蔽词为 fuck 和 shit：")
+			verbose(r"  config ban.words ['fuck', 'shit']")
+			verbose("为了降低误操作的可能性，建议删除后一个参数，进行交互修改。")
+			verbose("该操作将【清空】原有的屏蔽词列表，请谨慎操作！")
+			if not confirm():
 				return
-			print("\033[8;30m", end="", flush=True)
 	
 	if len(arg) == 1:
 		arg.append(None)
@@ -1455,32 +1519,25 @@ def do_config(arg, verbose=True, by=-1):
 					break
 			match = re.search(r"<(\d+)>", hint)
 			hint = hint + "\n<" + match.group(1) + ">:\n{}"
-			printc(verbose, hint.format(config[first][second]))
+			verbose(hint.format(config[first][second]))
 			if arg[0] == "gate.enter_hint":
-				printc(verbose, "该参数被修改后将对【所有用户】重新发送【广播】，请谨慎操作！")
-				try:
-					if not input("\033[0m\033[1;30m确定要继续吗？[y/N] ") in ["y", "Y"]:
-						return
-				except BaseException:
+				printc("该参数被修改后将对【所有用户】重新发送【广播】，请谨慎操作！")
+				if not confirm():
 					return
-				print("\033[8;30m\033[0m\033[1;30m", end="", flush=True)
+				print("\033[0m\033[1;30m", end="", flush=True)
 				arg[1] = enter()			
 			if arg[0] == "ban.ip":
-				printc(verbose, "该操作将【清空】原有的 IP 黑名单，请谨慎操作！")
-				try:
-					if not input("\033[0m\033[1;30m确定要继续吗？[y/N] ") in ["y", "Y"]:
-						return
-				except BaseException:
+				printc("该操作将【清空】原有的 IP 黑名单，请谨慎操作！")
+				if not confirm():
 					return
-				print("\033[8;30m", end="", flush=True)
 				arg[1] = []
-				printc(verbose, "请输入需要禁止访问的 IP 或 IP 段，每行一个。")
-				printc(verbose, "IP 段的前缀长度不得小于 24。")
-				printc(verbose, "IP 段中的所有地址将逐个参与去重并逐个存储。")
-				printc(verbose, "不合法的输入会被忽略并给出重输提示。")
-				printc(verbose, "重复的输入会被忽略，但不会给出重输提示。")
-				printc(verbose, "空行会被忽略。")
-				printc(verbose, "输入结束后，先按下 Enter，然后按下 Ctrl + {}。".format(shortcut))
+				printc("请输入需要禁止访问的 IP 或 IP 段，每行一个。")
+				printc("IP 段的前缀长度不得小于 24。")
+				printc("IP 段中的所有地址将逐个参与去重并逐个存储。")
+				printc("不合法的输入会被忽略并给出重输提示。")
+				printc("重复的输入会被忽略，但不会给出重输提示。")
+				printc("空行会被忽略。")
+				printc("输入结束后，先按下 Enter，然后按下 Ctrl + {}。".format(shortcut))
 				while True:
 					try:
 						line = input("\033[0m\033[1;30m")
@@ -1491,24 +1548,20 @@ def do_config(arg, verbose=True, by=-1):
 					if line:
 						ips = check_ip_segment(line)
 						if ips in [[], [""]]:
-							printc(verbose, "此行输入不合法，请重新输入。")
+							printc("此行输入不合法，请重新输入。")
 							continue
 						ips = [item for item in ips if not item in arg[1]]
 						arg[1] += ips
 			if arg[0] == "ban.words":
-				printc(verbose, "该操作将【清空】原有的屏蔽词列表，请谨慎操作！")
-				try:
-					if not input("\033[0m\033[1;30m确定要继续吗？[y/N] ") in ["y", "Y"]:
-						return
-				except BaseException:
+				printc("该操作将【清空】原有的屏蔽词列表，请谨慎操作！")
+				if not confirm():
 					return
-				print("\033[8;30m", end="", flush=True)
 				arg[1] = []
-				printc(verbose, "请输入屏蔽词，每行一个。")
-				printc(verbose, "屏蔽词可以带有空格。")
-				printc(verbose, "重复的输入会被忽略，但不会给出重输提示。")
-				printc(verbose, "空行会被忽略。")
-				printc(verbose, "输入结束后，先按下 Enter，然后按下 Ctrl + {}。".format(shortcut))
+				printc("请输入屏蔽词，每行一个。")
+				printc("屏蔽词可以带有空格。")
+				printc("重复的输入会被忽略，但不会给出重输提示。")
+				printc("空行会被忽略。")
+				printc("输入结束后，先按下 Enter，然后按下 Ctrl + {}。".format(shortcut))
 				while True:
 					try:
 						line = input("\033[0m\033[1;30m")
@@ -1525,63 +1578,26 @@ def do_config(arg, verbose=True, by=-1):
 				if line.startswith(arg[0]):
 					hint += line
 					break
-			printc(verbose, hint.format(config[first][second]))
-			try:
-				if not input("\033[0m\033[1;30m确定要修改吗？[y/N] ") in ["y", "Y"]:
-					return
-			except BaseException:
+			printc(hint.format(config[first][second]))
+			if not confirm():
 				return
-			print("\033[8;30m", end="", flush=True)
-			printc(verbose, "请输入新的参数值：")
+			printc("请输入新的参数值：")
 			try:
 				arg[1] = input("\033[0m\033[1;30m")
 			except BaseException:
 				return
 	
+	
 	try:
-		if not eval("isinstance({}, {})".format(arg[1], CONFIG_TYPE_CHECK_TABLE[arg[0]])):
-			printc(verbose, "输入数据的类型与参数不匹配。")
-			raise
-		if CONFIG_TYPE_CHECK_TABLE[arg[0]] == "int" and int(arg[1]) < 1:
-			printc(verbose, "输入的数值必须是正整数。")
-			raise
-		if arg[0] == "message.max_length" and int(arg[1]) > 16384:
-			printc(verbose, "允许的消息长度不得大于 16384。")
-			raise
-		if arg[0] == "file.max_size" and int(arg[1]) > 1073741824:
-			printc(verbose, "允许的文件大小不得大于 1073741824。")
-			raise
-		if arg[0] == "gate.enter_hint":
-			if len(eval(arg[1])) > config["message"]["max_length"]:
-				printc(verbose, "输入的进入提示太长，超出了参数 message.max_length 设定的限制。")
-				raise
-			for word in config["ban"]["words"]:
-				if word in eval(arg[1]):
-					printc(verbose, "输入的进入提示包含屏蔽词：" + word)
-					raise
-		if CONFIG_TYPE_CHECK_TABLE[arg[0]] == "list":
-			for item in eval(arg[1]):
-				if not isinstance(item, str):
-					printc(verbose, "列表中的元素必须是 str（字符串）类型。")
-					raise
-			if len(eval(arg[1])) != len(set(eval(arg[1]))):
-				printc(verbose, "列表中不能出现重复元素。")
-				raise
-		if arg[0] == "ban.words":
-			for item in eval(arg[1]):
-				if "\n" in item or "\r" in item or not item:
-					printc(verbose, "屏蔽词列表中不能出现空串和换行符。")
-					raise
-		if arg[0] == "ban.ip":
-			for item in eval(arg[1]):
-				if not check_ip(item):
-					printc(verbose, "IP 黑名单中的元素 {} 不是有效的点分十进制格式 IPv4 地址。".format(item))
-					raise
 		first, second = arg[0].split(".")
-		arg[1] = repr(formatize_config(arg[0], eval(arg[1])))
 		if config[first][second] == eval(arg[1]):
-			printc(verbose, "新的参数值不能和原值相同。")
+			verbose("新的参数值不能和原值相同。")
 			raise
+		check_result = check_config(config, arg[0], arg[1])
+		if check_result:
+			verbose(check_result)
+			raise
+		arg[1] = repr(formatize_config(arg[0], eval(arg[1])))
 		
 		if side == "Server":
 			if arg[0] == "gate.enter_hint" and eval(arg[1]):
@@ -1597,12 +1613,12 @@ def do_config(arg, verbose=True, by=-1):
 		if side == "Client":
 			upload({"type": "SERVER.CONFIG.POST", "key": first + "." + second, "value": eval(arg[1])}) # 协议 3.5.1
 	except:
-		printc(verbose, "指令格式不正确，请重试。")
+		verbose("指令格式不正确，请重试。")
 		return
 	
-	printc(verbose, "操作成功。")
+	verbose("操作成功。")
 
-def do_ban(arg, verbose=True, by=-1):
+def do_ban(arg, verbose=printc, by=-1):
 	global log_queue
 	global send_queue
 	global config
@@ -1610,36 +1626,36 @@ def do_ban(arg, verbose=True, by=-1):
 	if by == -1:
 		by = my_uid
 	if not users[by]["status"] in ["Admin", "Root"]:
-		printc(verbose, "只有处于 Admin 或 Root 状态的用户有权执行该操作。")
+		verbose("只有处于 Admin 或 Root 状态的用户有权执行该操作。")
 		return
 	arg = arg.split(" ", 2)
 	if len(arg) != 3:
-		printc(verbose, "参数错误：应当给出恰好 3 个参数。")
+		verbose("参数错误：应当给出恰好 3 个参数。")
 		return
 	if not arg[0] in ["ip", "words"]:
-		printc(verbose, "参数错误：第一个参数必须是 ip 和 words 中的某一项。")
+		verbose("参数错误：第一个参数必须是 ip 和 words 中的某一项。")
 		return
 	if not arg[1] in ["add", "remove"]:
-		printc(verbose, "参数错误：第二个参数必须是 add 和 remove 中的某一项。")
+		verbose("参数错误：第二个参数必须是 add 和 remove 中的某一项。")
 		return
 	
 	if arg[0] == "ip":
 		ips = check_ip_segment(arg[2])
 		if ips == []:
-			printc(verbose, "输入数据不是合法的点分十进制格式 IPv4 地址或 IPv4 段。")
+			verbose("输入数据不是合法的点分十进制格式 IPv4 地址或 IPv4 段。")
 			return
 		if ips == [""]:
-			printc(verbose, "出于性能、安全性和实际使用环境考虑，IPv4 段的前缀长度不得小于 24。")
+			verbose("出于性能、安全性和实际使用环境考虑，IPv4 段的前缀长度不得小于 24。")
 			return
 		if arg[1] == "add":
 			ips = [item for item in ips if not item in config["ban"]["ip"]]
 			if ips == []:
-				printc(verbose, "所有待封禁的 IP 地址先前都已经被封禁过了。")
+				verbose("所有待封禁的 IP 地址先前都已经被封禁过了。")
 				return
 		if arg[1] == "remove":
 			ips = [item for item in ips if item in config["ban"]["ip"]]
 			if ips == []:
-				printc(verbose, "所有待解除封禁的 IP 地址先前都已经被解除封禁过了。")
+				verbose("所有待解除封禁的 IP 地址先前都已经被解除封禁过了。")
 				return
 		
 		if arg[1] == "add":
@@ -1654,7 +1670,7 @@ def do_ban(arg, verbose=True, by=-1):
 				new_value = config["ban"]["ip"] + ips
 				new_value = formatize_config("ban.ip", new_value)
 				upload({"type": "SERVER.CONFIG.POST", "key": "ban.ip", "value": new_value}) # 协议 3.5.1
-			printc(verbose, "操作成功，共计封禁了 {} 个 IP 地址。".format(len(ips)))
+			verbose("操作成功，共计封禁了 {} 个 IP 地址。".format(len(ips)))
 		
 		if arg[1] == "remove":
 			if side == "Server":
@@ -1668,27 +1684,26 @@ def do_ban(arg, verbose=True, by=-1):
 				new_value = [item for item in config["ban"]["ip"] if not item in ips]
 				new_value = formatize_config("ban.ip", new_value)
 				upload({"type": "SERVER.CONFIG.POST", "key": "ban.ip", "value": new_value}) # 协议 3.5.1
-			printc(verbose, "操作成功，共计解除封禁了 {} 个 IP 地址。".format(len(ips)))
+			verbose("操作成功，共计解除封禁了 {} 个 IP 地址。".format(len(ips)))
 	
 	if arg[0] == "words":
 		if "\n" in arg[2] or "\r" in arg[2] or not arg[2]:
-			printc(verbose, "屏蔽词不能为空串，且不能包含换行符。")
+			verbose("屏蔽词不能为空串，且不能包含换行符。")
 			return
 		if " " in arg[2]:
-			if verbose:
-				printc(verbose, "请注意，您输入的屏蔽词包含空格。")
-				printc(verbose, "系统读取到的屏蔽词为（不包含开头的 ^ 符号和结尾的 $ 符号）：")
-				printc(verbose, "^" + arg[2] + "$")
-				try:
-					if not input("\033[0m\033[1;30m确定要继续吗？[y/N] ") in ["y", "Y"]:
-						return
-				except BaseException:
+			if verbose == printc:
+				verbose("请注意，您输入的屏蔽词包含空格。")
+				verbose("系统读取到的屏蔽词为（不包含开头的 ^ 符号和结尾的 $ 符号）：")
+				verbose("^" + arg[2] + "$")
+				if not confirm():
 					return
-				print("\033[8;30m", end="", flush=True)
 		
 		if arg[1] == "add":
 			if arg[2] in config["ban"]["words"]:
-				printc(verbose, "该屏蔽词已经在列表中出现了。")
+				verbose("该屏蔽词已经在列表中出现了。")
+				return
+			if arg[2] in config["gate"]["enter_hint"]:
+				verbose("该屏蔽词已经在进入提示中出现了，请先修改进入提示。")
 				return
 			if side == "Server":
 				config["ban"]["words"].append(arg[2])
@@ -1702,11 +1717,11 @@ def do_ban(arg, verbose=True, by=-1):
 				new_value.append(arg[2])
 				new_value = formatize_config("ban.words", new_value)
 				upload({"type": "SERVER.CONFIG.POST", "key": "ban.words", "value": new_value}) # 协议 3.5.1
-			printc(verbose, "操作成功。")
+			verbose("操作成功。")
 		
 		if arg[1] == "remove":
 			if not arg[2] in config["ban"]["words"]:
-				printc(verbose, "该屏蔽词不在列表中。")
+				verbose("该屏蔽词不在列表中。")
 				return
 			if side == "Server":
 				config["ban"]["words"].remove(arg[2])
@@ -1720,9 +1735,9 @@ def do_ban(arg, verbose=True, by=-1):
 				new_value.remove(arg[2])
 				new_value = formatize_config("ban.words", new_value)
 				upload({"type": "SERVER.CONFIG.POST", "key": "ban.words", "value": new_value}) # 协议 3.5.1
-			printc(verbose, "操作成功。")
+			verbose("操作成功。")
 
-def do_broadcast(arg, message=None, verbose=True, by=-1):
+def do_broadcast(arg, message=None, verbose=printc, by=-1):
 	global history
 	global log_queue
 	global send_queue
@@ -1731,7 +1746,7 @@ def do_broadcast(arg, message=None, verbose=True, by=-1):
 	if by == -1:
 		by = my_uid
 	if not users[by]["status"] in ["Admin", "Root"]:
-		printc(verbose, "只有处于 Admin 或 Root 状态的用户有权执行该操作。")
+		verbose("只有处于 Admin 或 Root 状态的用户有权执行该操作。")
 		return
 	if message == None:
 		# 在同一行带有参数（消息）则将指令识别为单行输入方法，
@@ -1751,9 +1766,9 @@ def do_broadcast(arg, message=None, verbose=True, by=-1):
 	if side == "Client":
 		upload({"type": "CHAT.SEND", "filename": "", "content": message, "to": -2}) # 协议 2.1
 	
-	printc(verbose, "操作成功。")
+	verbose("操作成功。")
 
-def do_send(arg, message=None, verbose=True, by=-1):
+def do_send(arg, message=None, verbose=printc, by=-1):
 	global history
 	global log_queue
 	global send_queue
@@ -1767,14 +1782,14 @@ def do_send(arg, message=None, verbose=True, by=-1):
 		else:
 			message = enter()
 	if not message:
-		printc(verbose, "发送失败：消息不能为空。")
+		verbose("发送失败：消息不能为空。")
 		return
 	if len(message) > config["message"]["max_length"]:
-		printc(verbose, "发送失败：消息太长。")
+		verbose("发送失败：消息太长。")
 		return
 	for word in config["ban"]["words"]:
 		if word in message:
-			printc(verbose, "发送失败：消息中包含屏蔽词：" + word)
+			verbose("发送失败：消息中包含屏蔽词：" + word)
 			return
 	
 	if side == "Server":
@@ -1787,9 +1802,9 @@ def do_send(arg, message=None, verbose=True, by=-1):
 	if side == "Client":
 		upload({"type": "CHAT.SEND", "filename": "", "content": message, "to": -1}) # 协议 2.1
 	
-	printc(verbose, "发送成功。")
+	verbose("发送成功。")
 
-def do_whisper(arg, message=None, verbose=True, by=-1):
+def do_whisper(arg, message=None, verbose=printc, by=-1):
 	global log_queue
 	global send_queue
 	global my_socket
@@ -1797,7 +1812,7 @@ def do_whisper(arg, message=None, verbose=True, by=-1):
 	if by == -1:
 		by = my_uid
 	if not config["message"]["allow_private"]:
-		printc(verbose, "此聊天室目前不允许发送私聊消息。")
+		verbose("此聊天室目前不允许发送私聊消息。")
 		return
 	arg = parse_username(arg, ["Online", "Admin", "Root"])
 	# 分离接收方 UID 和（可能不存在的）单行消息
@@ -1808,22 +1823,22 @@ def do_whisper(arg, message=None, verbose=True, by=-1):
 	try:
 		arg = int(arg)
 	except:
-		printc(verbose, "参数错误：用户解析失败，只能对状态处于 Online、Admin、Root 中的某一项的用户操作。")
+		verbose("参数错误：用户解析失败，只能对状态处于 Online、Admin、Root 中的某一项的用户操作。")
 		return
 	if arg == by:
-		printc(verbose, "不能向自己发送私聊消息。")
+		verbose("不能向自己发送私聊消息。")
 		return
 	if message == None: # 同上，识别调用方法
 		message = enter()
 	if not message:
-		printc(verbose, "发送失败：消息不能为空。")
+		verbose("发送失败：消息不能为空。")
 		return
 	if len(message) > config["message"]["max_length"]:
-		printc(verbose, "发送失败：消息太长。")
+		verbose("发送失败：消息太长。")
 		return
 	for word in config["ban"]["words"]:
 		if word in message:
-			printc(verbose, "发送失败：消息中包含屏蔽词：" + word)
+			verbose("发送失败：消息中包含屏蔽词：" + word)
 			return
 	
 	if side == "Server":
@@ -1839,9 +1854,9 @@ def do_whisper(arg, message=None, verbose=True, by=-1):
 	if side == "Client":
 		upload({"type": "CHAT.SEND", "filename": "", "content": message, "to": arg}) # 协议 2.1
 	
-	printc(verbose, "发送成功。")
+	verbose("发送成功。")
 
-def do_distribute(arg, message=None, verbose=True, by=-1):
+def do_distribute(arg, message=None, verbose=printc, by=-1):
 	global log_queue
 	global send_queue
 	global my_socket
@@ -1849,11 +1864,11 @@ def do_distribute(arg, message=None, verbose=True, by=-1):
 	if by == -1:
 		by = my_uid
 	if not config["file"]["allow_any"]:
-		printc(verbose, "此聊天室目前不允许发送文件。")
+		verbose("此聊天室目前不允许发送文件。")
 		return
 	for word in config["ban"]["words"]:
 		if word in arg:
-			printc(verbose, "发送失败：文件名中包含屏蔽词：" + word)
+			verbose("发送失败：文件名中包含屏蔽词：" + word)
 			return
 	# 服务端调用函数时，从协议中传过来的 message 字段
 	# 本身就是 base64 加密过的数据，因此跳过重复的加密操作（下同）
@@ -1864,14 +1879,14 @@ def do_distribute(arg, message=None, verbose=True, by=-1):
 				file_data = f.read()
 			message = base64.b64encode(file_data).decode("ascii")
 		except:
-			printc(verbose, "无法读取对应文件。")
+			verbose("无法读取对应文件。")
 			return
 	# 用 base64 编码串的长度计算原文件大小，
 	# 由于 base64 本身的特性，
 	# 计算出的大小会向上取整到 3 的倍数，
 	# 这相当于 file.max_size 向下取整到 3 的倍数（下同）
 	if len(message) * 3 // 4 > config["file"]["max_size"]:
-		printc(verbose, "发送失败：文件太大。")
+		verbose("发送失败：文件太大。")
 		return
 	
 	if side == "Server":
@@ -1916,12 +1931,12 @@ def do_distribute(arg, message=None, verbose=True, by=-1):
 					# 是正常的，重新尝试发送即可（下同）
 					continue
 				except Exception as e:
-					printc(verbose, "发送失败：{}".format(e))
+					verbose("发送失败：{}".format(e))
 					return
 	
-	printc(verbose, "发送成功。")
+	verbose("发送成功。")
 
-def do_transfer(arg, message=None, verbose=True, by=-1):
+def do_transfer(arg, message=None, verbose=printc, by=-1):
 	global log_queue
 	global send_queue
 	global my_socket
@@ -1929,10 +1944,10 @@ def do_transfer(arg, message=None, verbose=True, by=-1):
 	if by == -1:
 		by = my_uid
 	if not config["file"]["allow_any"]:
-		printc(verbose, "此聊天室目前不允许发送文件。")
+		verbose("此聊天室目前不允许发送文件。")
 		return
 	if not config["file"]["allow_private"]:
-		printc(verbose, "此聊天室目前不允许发送私有文件。")
+		verbose("此聊天室目前不允许发送私有文件。")
 		return
 	arg = parse_username(arg, ["Online", "Admin", "Root"])
 	# 分离接收方 UID 和（可能不存在的）文件名
@@ -1943,17 +1958,17 @@ def do_transfer(arg, message=None, verbose=True, by=-1):
 	try:
 		arg = int(arg)
 	except:
-		printc(verbose, "参数错误：用户解析失败，只能对状态处于 Online、Admin、Root 中的某一项的用户操作。")
+		verbose("参数错误：用户解析失败，只能对状态处于 Online、Admin、Root 中的某一项的用户操作。")
 		return
 	if not users[arg]["status"] in ["Online", "Admin", "Root"]:
-		printc(verbose, "只能向状态处于 Online、Admin、Root 中的某一项的用户发送私有文件。")
+		verbose("只能向状态处于 Online、Admin、Root 中的某一项的用户发送私有文件。")
 		return
 	if arg == by:
-		printc(verbose, "不能向自己发送私有文件。")
+		verbose("不能向自己发送私有文件。")
 		return
 	for word in config["ban"]["words"]:
 		if word in filename:
-			printc(verbose, "发送失败：文件名中包含屏蔽词：" + word)
+			verbose("发送失败：文件名中包含屏蔽词：" + word)
 			return
 	if not message: # 同上，跳过重复的加密操作
 		try:
@@ -1962,10 +1977,10 @@ def do_transfer(arg, message=None, verbose=True, by=-1):
 				file_data = f.read()
 			message = base64.b64encode(file_data).decode("ascii")
 		except:
-			printc(verbose, "无法读取对应文件。")
+			verbose("无法读取对应文件。")
 			return
 	if len(message) * 3 // 4 > config["file"]["max_size"]: # 同上，计算原文件大小
-		printc(verbose, "发送失败：文件太大。")
+		verbose("发送失败：文件太大。")
 		return
 	
 	if side == "Server":
@@ -2007,10 +2022,10 @@ def do_transfer(arg, message=None, verbose=True, by=-1):
 					# 同上，重新尝试发送即可
 					continue
 				except Exception as e:
-					printc(verbose, "发送失败：{}".format(e))
+					verbose("发送失败：{}".format(e))
 					return
 	
-	printc(verbose, "发送成功。")
+	verbose("发送成功。")
 
 def do_advertise(arg=None):
 	print()
@@ -2018,60 +2033,60 @@ def do_advertise(arg=None):
 	print()
 
 def do_dashboard(arg=None):
-	printf("=" * 76, "black")
-	printf("服务端版本：" + server_version, "black")
-	printf("您的 UID：" + str(my_uid), "black")
-	printf("您的状态：" + users[my_uid]["status"], "black")
-	printf("在线人数：{} / {}".format(online_count, config["general"]["max_connections"]), "black")
-	printf("聊天室参数及具体用户信息详见下表。", "black")
-	printf("=" * 76, "black")
-	printf(CONFIG_LIST.format(config["gate"]["enter_check"], \
+	printc("=" * 76)
+	printc("服务端版本：" + server_version)
+	printc("您的 UID：" + str(my_uid))
+	printc("您的状态：" + users[my_uid]["status"])
+	printc("在线人数：{} / {}".format(online_count, config["general"]["max_connections"]))
+	printc("聊天室参数及具体用户信息详见下表。")
+	printc("=" * 76)
+	printc(CONFIG_LIST.format(config["gate"]["enter_check"], \
 		config["message"]["allow_private"], config["message"]["max_length"], \
 		config["file"]["allow_any"], config["file"]["allow_private"], \
 		config["file"]["max_size"], config["ban"]["ip"], config["ban"]["words"], \
-		config["gate"]["enter_hint"]), "black")
-	printf("=" * 76, "black")
+		config["gate"]["enter_hint"]))
+	printc("=" * 76)
 	if "ip" in users[0]:
-		printf(" UID  IP                        状态      用户名", "black")
+		printc(" UID  IP                        状态      用户名")
 		for i in range(len(users)):
-			printf("{:>4}  {:<26}{:<10}{}".format(i, "{}:{}".format(users[i]["ip"][0], users[i]["ip"][1]), users[i]["status"], users[i]["username"]), "black")
+			printc("{:>4}  {:<26}{:<10}{}".format(i, "{}:{}".format(users[i]["ip"][0], users[i]["ip"][1]), users[i]["status"], users[i]["username"]))
 	else:
-		printf(" UID  状态      用户名", "black")
+		printc(" UID  状态      用户名")
 		for i in range(len(users)):
-			printf("{:>4}  {:<10}{}".format(i, users[i]["status"], users[i]["username"]), "black")
-	printf("=" * 76, "black")
+			printc("{:>4}  {:<10}{}".format(i, users[i]["status"], users[i]["username"]))
+	printc("=" * 76)
 
 def do_flood(arg=None):
 	global blocked
 	global exit_flag
 	
 	if not arg:
-		printf("参数错误：应当给出至少 1 个参数。", "black")
+		printc("参数错误：应当给出至少 1 个参数。")
 		return
 	arg = arg.split(" ", 1)
 	if arg[0] in ABBREVIATION_TABLE.keys():
 		arg[0] = ABBREVIATION_TABLE[arg[0]]
 	if not arg[0] in FLOOD_MESSAGE_TYPES.keys():
-		printf("参数错误：第一个参数不在支持的指令名称中。", "black")
+		printc("参数错误：第一个参数不在支持的指令名称中。")
 		return
 	if arg[0] == "broadcast" and not users[my_uid]["status"] in ["Admin", "Root"]:
-		printf("只有处于 Admin 或 Root 状态的用户有权执行该操作。", "black")
+		printc("只有处于 Admin 或 Root 状态的用户有权执行该操作。")
 		return
 	if arg[0] == "whisper":
 		if len(arg) == 1:
-			printf("参数错误：第一个参数为 whisper 时，应当给出恰好 2 个参数。", "black")
+			printc("参数错误：第一个参数为 whisper 时，应当给出恰好 2 个参数。")
 			return
 		if not config["message"]["allow_private"]:
-			printf("此聊天室目前不允许发送私聊消息。", "black")
+			printc("此聊天室目前不允许发送私聊消息。")
 			return
 		arg[1] = parse_username(arg[1], ["Online", "Admin", "Root"])
 		try:
 			arg[1] = int(arg[1])
 		except:
-			printf("参数错误：用户解析失败，只能对状态处于 Online、Admin、Root 中的某一项的用户操作。", "black")
+			printc("参数错误：用户解析失败，只能对状态处于 Online、Admin、Root 中的某一项的用户操作。")
 			return
 		if arg[1] == my_uid:
-			printf("不能向自己发送私聊消息。", "black")
+			printc("不能向自己发送私聊消息。")
 			return
 	
 	message_type = FLOOD_MESSAGE_TYPES[arg[0]]
@@ -2086,34 +2101,34 @@ def do_flood(arg=None):
 			print("\033[0m", end="", flush=True)
 			return
 		if arg[0] == "broadcast" and not users[my_uid]["status"] in ["Admin", "Root"]:
-			printf("您失去了发送广播消息的权限，现在自动退出简易命令行模式。", "black")
+			printc("您失去了发送广播消息的权限，现在自动退出简易命令行模式。")
 			return
 		if arg[0] == "whisper":
 			if not config["message"]["allow_private"]:
-				printf("聊天室禁止了私聊消息的发送，现在自动退出简易命令行模式。", "black")
+				printc("聊天室禁止了私聊消息的发送，现在自动退出简易命令行模式。")
 				return
 			if not users[arg[1]]["status"] in ["Online", "Admin", "Root"]:
-				printf("您指定的私聊消息发送对象已经下线，现在自动退出简易命令行模式。", "black")
+				printc("您指定的私聊消息发送对象已经下线，现在自动退出简易命令行模式。")
 				return
 		
 		# 输出模式
 		try:
 			input()
 		except EOFError:
-			printf("您已经退出简易命令行模式。", "black")
+			printc("您已经退出简易命令行模式。")
 			return
 		except BaseException:
 			pass
 		
 		if arg[0] == "broadcast" and not users[my_uid]["status"] in ["Admin", "Root"]:
-			printf("您失去了发送广播消息的权限，现在自动退出简易命令行模式。", "black")
+			printc("您失去了发送广播消息的权限，现在自动退出简易命令行模式。")
 			return
 		if arg[0] == "whisper":
 			if not config["message"]["allow_private"]:
-				printf("聊天室禁止了私聊消息的发送，现在自动退出简易命令行模式。", "black")
+				printc("聊天室禁止了私聊消息的发送，现在自动退出简易命令行模式。")
 				return
 			if not users[arg[1]]["status"] in ["Online", "Admin", "Root"]:
-				printf("您指定的私聊消息发送对象已经下线，现在自动退出简易命令行模式。", "black")
+				printc("您指定的私聊消息发送对象已经下线，现在自动退出简易命令行模式。")
 				return
 		
 		# 变更为输入模式
@@ -2122,7 +2137,7 @@ def do_flood(arg=None):
 			message = input("\033[0m\033[1;30m> ")
 		except EOFError:
 			print()
-			printf("您已经退出简易命令行模式。", "black")
+			printc("您已经退出简易命令行模式。")
 			return
 		except BaseException:
 			message = ""
@@ -2135,7 +2150,10 @@ def do_flood(arg=None):
 		if arg[0] == "whisper":
 			message = str(arg[1]) + " " + message
 		now = eval("do_{}".format(arg[0]))
-		now(message)
+		try:
+			now(message, None, nothing, -1)
+		except TypeError:
+			now(message)
 		print("\033[8;30m", end="", flush=True)
 		
 		# 变更为输出模式
@@ -2338,25 +2356,25 @@ def thread_process():
 			if content["type"] == "CHAT.SEND": # 协议 2.1
 				if not content["filename"]:
 					if content["to"] == -2:
-						do_broadcast(None, content["content"], False, sender)
+						do_broadcast(None, content["content"], nothing, sender)
 					if content["to"] == -1:
-						do_send(None, content["content"], False, sender)
+						do_send(None, content["content"], nothing, sender)
 					if content["to"] >= 0:
-						do_whisper(str(content["to"]), content["content"], False, sender)
+						do_whisper(str(content["to"]), content["content"], nothing, sender)
 				else:
 					if content["to"] == -1:
-						do_distribute(content["filename"], content["content"], False, sender)
+						do_distribute(content["filename"], content["content"], nothing, sender)
 					else:
-						do_transfer(str(content["to"]) + " " + content["filename"], content["content"], False, sender)
+						do_transfer(str(content["to"]) + " " + content["filename"], content["content"], nothing, sender)
 			if content["type"] == "GATE.STATUS_CHANGE.REQUEST": # 协议 1.6.1
 				if content["status"] == "Kicked":
-					do_kick(str(content["uid"]), False, sender)
+					do_kick(str(content["uid"]), nothing, sender)
 				if content["status"] == "Rejected":
-					do_doorman("reject " + str(content["uid"]), False, sender)
+					do_doorman("reject " + str(content["uid"]), nothing, sender)
 				if content["status"] == "Online":
-					do_doorman("accept " + str(content["uid"]), False, sender)
+					do_doorman("accept " + str(content["uid"]), nothing, sender)
 			if content["type"] == "SERVER.CONFIG.POST": # 协议 3.5.1
-				do_config("{} {}".format(content["key"], repr(content["value"])), False, sender)
+				do_config("{} {}".format(content["key"], repr(content["value"])), nothing, sender)
 
 def thread_receive():
 	global receive_queue
@@ -2618,39 +2636,8 @@ def main():
 			if not tmp_config["side"] in ["Server", "Client"]:
 				raise
 			if tmp_config["side"] == "Server":
-				for item, type in CONFIG_TYPE_CHECK_TABLE.items():
-					first, second = item.split(".")
-					tmp_object = tmp_config[first][second]
-					if not eval("isinstance(tmp_object, {})".format(type)):
-						raise
-					if type == "int" and tmp_object < 1:
-						raise
-					if item == "message.max_length" and tmp_object > 16384:
-						raise
-					if item == "file.max_size" and tmp_object > 1073741824:
-						raise
-					if type == "list":
-						for element in tmp_object:
-							if not isinstance(element, str):
-								raise
-						if len(tmp_object) != len(set(tmp_object)):
-							raise
-					if item == "ban.words":
-						for element in tmp_object:
-							if "\n" in element or "\r" in element or not element:
-								raise
-					if item == "ban.ip":
-						for element in tmp_object:
-							if not check_ip(element):
-								raise
-					if item == "general.server_ip" and not check_ip(tmp_object):
-						raise
-					if item == "general.server_port" and tmp_object > 65535:
-						raise
-					if item == "general.server_username" and not tmp_object:
-						raise
-					if item == "general.max_connections" and tmp_object > 128:
-						raise
+				if check_config(tmp_config):
+					raise
 				config = tmp_config
 			if tmp_config["side"] == "Client":
 				if not isinstance(tmp_config["ip"], str):
